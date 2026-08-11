@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/build-android.yml"
       - "patches/**"
+      - "overlay/**"
   pull_request:
     branches: [main]
 
@@ -16,7 +17,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout build harness
@@ -39,7 +40,9 @@ jobs:
             "platform-tools" \
             "build-tools;35.0.1" \
             "platforms;android-35" \
-            "cmdline-tools;latest"
+            "cmdline-tools;latest" \
+            "cmake;3.10.2.4988404" \
+            "ndk;28.1.13356709"
 
       - name: Setup Godot 4.7 and export templates
         uses: solarlabyrinth/action-setup-godot@v3
@@ -56,14 +59,25 @@ jobs:
           test -x "$ANDROID_HOME/platform-tools/adb"
           test -d "$ANDROID_HOME/build-tools/35.0.1"
 
-      - name: Reassemble Android port patch
+      - name: Reassemble base Android port patch
         shell: bash
         run: |
           cat patches/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/android-port.patch"
           test "$(wc -c < "$RUNNER_TEMP/android-port.patch")" -eq 12544
           grep -q "TransparentWindowCompat.gd" "$RUNNER_TEMP/android-port.patch"
 
-      - name: Fetch pinned deskSaw source and apply Android patch
+      - name: Reassemble desktop-pet overlay payload
+        shell: bash
+        run: |
+          cat overlay/v2/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/desksaw-overlay-v2.zip"
+          echo "2b7083641d03cd2c1d5d72fa18a63399f11c91dd4b4cc9c8f0e586eeff3a9ba6  $RUNNER_TEMP/desksaw-overlay-v2.zip" | sha256sum -c -
+          rm -rf "$RUNNER_TEMP/desksaw-overlay-v2"
+          mkdir -p "$RUNNER_TEMP/desksaw-overlay-v2"
+          unzip -q "$RUNNER_TEMP/desksaw-overlay-v2.zip" -d "$RUNNER_TEMP/desksaw-overlay-v2"
+          test -f "$RUNNER_TEMP/desksaw-overlay-v2/apply_android_overlay.py"
+          test -f "$RUNNER_TEMP/desksaw-overlay-v2/android/src/main/java/com/godot/game/DeskSawOverlayService.java"
+
+      - name: Fetch pinned deskSaw source and apply base Android patch
         shell: bash
         run: |
           git init source
@@ -74,34 +88,54 @@ jobs:
           git -C source apply "$RUNNER_TEMP/android-port.patch"
 
           # The upstream tree references godot-console, but its addon files are not
-          # present in the source checkout. Restore the addon and use a stable path
-          # for the Console autoload instead of relying on a missing UID cache.
+          # present in the source checkout. Restore it before Godot initializes.
           rm -rf source/addons/godot-console
           git clone --depth=1 https://github.com/4d49/godot-console.git source/addons/godot-console
           sed -i 's#Console="\*uid://dc5wc5117h2vk"#Console="*res://addons/godot-console/scripts/console.gd"#' source/project.godot
-
-          # Android port is intentionally a normal opaque full-screen app. Keeping
-          # the desktop transparent-window flags makes Godot require a Gradle build.
-          sed -i 's#window/size/transparent=true#window/size/transparent=false#' source/project.godot
-          sed -i 's#window/per_pixel_transparency/allowed=true#window/per_pixel_transparency/allowed=false#' source/project.godot
-
-          # Standard template export does not use Gradle. Min/Target SDK overrides
-          # are Gradle-only in Godot 4.7, so remove those overrides and use the
-          # template defaults instead.
-          sed -i '/^gradle_build\/min_sdk=/d' source/export_presets.cfg
-          sed -i '/^gradle_build\/target_sdk=/d' source/export_presets.cfg
-
-          # Make the APK visible in the Android launcher.
-          sed -i 's#package/show_as_launcher_app=false#package/show_as_launcher_app=true#' source/export_presets.cfg
-
-          grep -q 'platform="Android"' source/export_presets.cfg
-          grep -q 'package/show_as_launcher_app=true' source/export_presets.cfg
-          grep -q 'window/size/transparent=false' source/project.godot
-          grep -q 'window/per_pixel_transparency/allowed=false' source/project.godot
-          grep -q 'Console="\*res://addons/godot-console/scripts/console.gd"' source/project.godot
           test -f source/addons/godot-console/scripts/console.gd
-          ! grep -q '^gradle_build/min_sdk=' source/export_presets.cfg
-          ! grep -q '^gradle_build/target_sdk=' source/export_presets.cfg
+
+      - name: Install official Godot Gradle build template
+        shell: bash
+        run: |
+          # Transparent TYPE_APPLICATION_OVERLAY output and custom Android Java require
+          # Godot's Gradle build. Preload the overlay project's valid Gradle settings
+          # before asking Godot to install res://android/build.
+          cp "$RUNNER_TEMP/desksaw-overlay-v2/godot/project.godot" source/project.godot
+          cp "$RUNNER_TEMP/desksaw-overlay-v2/godot/export_presets.cfg" source/export_presets.cfg
+
+          rm -rf source/android/build
+          godot --headless --verbose --path source --install-android-build-template
+          test -d source/android/build
+          test -f source/android/build/build.gradle
+          find source/android/build -path '*/com/godot/game/GodotApp.java' -print -quit | grep -q .
+
+      - name: Apply Android desktop-pet overlay integration
+        shell: bash
+        run: |
+          python "$RUNNER_TEMP/desksaw-overlay-v2/apply_android_overlay.py" \
+            "$GITHUB_WORKSPACE/source" \
+            "$GITHUB_WORKSPACE/source/android/build"
+
+          grep -q 'gradle_build/use_gradle_build=true' source/export_presets.cfg
+          grep -q 'gradle_build/min_sdk=24' source/export_presets.cfg
+          grep -q 'gradle_build/target_sdk=35' source/export_presets.cfg
+          grep -q 'window/size/transparent=true' source/project.godot
+          grep -q 'window/per_pixel_transparency/allowed=true' source/project.godot
+          grep -q 'window/handheld/orientation=6' source/project.godot
+          grep -q 'sensors/enable_gravity=true' source/project.godot
+          grep -q 'sensors/enable_gyroscope=true' source/project.godot
+          grep -q 'Console="\*res://addons/godot-console/scripts/console.gd"' source/project.godot
+
+          MANIFEST="$(grep -rl 'DeskSawOverlayService' source/android/build --include='AndroidManifest.xml' | head -n1)"
+          test -n "$MANIFEST"
+          grep -q 'android.permission.SYSTEM_ALERT_WINDOW' "$MANIFEST"
+          grep -q 'android.permission.FOREGROUND_SERVICE' "$MANIFEST"
+          grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$MANIFEST"
+          grep -q 'foregroundServiceType="specialUse"' "$MANIFEST"
+
+          find source/android/build -name DeskSawOverlayService.java -print -quit | grep -q .
+          find source/android/build -name DeskSawOverlayPlugin.java -print -quit | grep -q .
+          grep -q 'Console.create_command("gyroGravity"' source/Scripts/impo/commands.gd
 
       - name: Configure Android signing and Godot editor paths
         shell: bash
@@ -115,7 +149,6 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          # action-setup-godot/Godot 4.7 loads editor_settings-4.7.tres in CI.
           cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
           [gd_resource type="EditorSettings" format=3]
 
@@ -132,12 +165,12 @@ jobs:
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
 
-      - name: Import project
+      - name: Import project and validate scripts
         shell: bash
         run: |
           godot --headless --verbose --path source --import
 
-      - name: Export debug APK
+      - name: Export debug APK with Gradle
         shell: bash
         run: |
           mkdir -p source/build
