@@ -19,3 +19,5 @@ Concurrency trigger: cancel stale headless builds and run the direct-template bu
 Overlay v3 trigger: patch the real src/main AndroidManifest.xml.
 
 ZIP CRC trigger: validate archive contents instead of byte-identical metadata.
+
+V4 chunk trigger: rebuild exact overlay payload from six connector-safe chunks.
