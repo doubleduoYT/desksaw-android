@@ -87,7 +87,7 @@ jobs:
           printf '%s\n' "$TEMPLATE_VERSION" > source/android/.build_version
           test -s source/android/.build_version
 
-      - name: Apply desktop-pet overlay and touch passthrough fix
+      - name: Apply desktop-pet overlay and touch/install compatibility fixes
         shell: bash
         run: |
           set -euo pipefail
@@ -96,6 +96,9 @@ jobs:
             "$GITHUB_WORKSPACE/source/android/build"
 
           git -C source apply "$GITHUB_WORKSPACE/overlay/v5/touch-passthrough.patch"
+          python "$GITHUB_WORKSPACE/overlay/v5/compat-install.py" \
+            "$GITHUB_WORKSPACE/source" \
+            "$GITHUB_WORKSPACE/source/android/build"
 
           grep -q '_update_android_touch_regions' source/Scripts/impo/dragExp.gd
           grep -q '_android_region_ids' source/Scripts/impo/dragExp.gd
@@ -104,19 +107,21 @@ jobs:
             exit 1
           fi
           grep -q 'FLAG_NOT_TOUCHABLE' "$(find source/android/build -name DeskSawOverlayService.java -print -quit)"
+          grep -q 'package/unique_name="org.deedee14.desksaw.pet"' source/export_presets.cfg
+          grep -q 'gradle_build/target_sdk="33"' source/export_presets.cfg
+          ! grep -q 'FOREGROUND_SERVICE_SPECIAL_USE' source/android/build/src/main/AndroidManifest.xml
+          ! grep -q 'foregroundServiceType="specialUse"' source/android/build/src/main/AndroidManifest.xml
+          ! grep -q 'PROPERTY_SPECIAL_USE_FGS_SUBTYPE' source/android/build/src/main/AndroidManifest.xml
+          ! grep -q 'android.intent.category.HOME' source/android/build/src/main/AndroidManifest.xml
 
-      - name: Configure signing and Godot Android paths
+      - name: Configure persistent signing and Godot Android paths
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.android" "$HOME/.config/godot"
-          if [ ! -f "$HOME/.android/debug.keystore" ]; then
-            keytool -genkeypair -noprompt \
-              -keystore "$HOME/.android/debug.keystore" \
-              -storepass android -keypass android \
-              -alias androiddebugkey -keyalg RSA -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
+          base64 -d signing/desksaw-pet-debug.keystore.b64 > "$HOME/.android/desksaw-pet.keystore"
+          echo "16910cea0d4d7a653ced89ce69e0eb79a3e8cc585f4adc6af1e689729df22e30  $HOME/.android/desksaw-pet.keystore" | sha256sum -c -
+          keytool -list -keystore "$HOME/.android/desksaw-pet.keystore" -storepass android -alias desksawpet >/dev/null
 
           cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
           [gd_resource type="EditorSettings" format=3]
@@ -124,14 +129,14 @@ jobs:
           [resource]
           export/android/android_sdk_path = "$ANDROID_HOME"
           export/android/java_sdk_path = "$JAVA_HOME"
-          export/android/debug_keystore = "$HOME/.android/debug.keystore"
-          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore = "$HOME/.android/desksaw-pet.keystore"
+          export/android/debug_keystore_user = "desksawpet"
           export/android/debug_keystore_pass = "android"
           EOF
           cp "$HOME/.config/godot/editor_settings-4.7.tres" "$HOME/.config/godot/editor_settings-4.tres"
 
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/desksaw-pet.keystore" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=desksawpet" >> "$GITHUB_ENV"
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
 
       - name: Import project and validate GDScript
@@ -139,20 +144,42 @@ jobs:
         run: |
           godot --headless --verbose --path source --import
 
-      - name: Export touch-fix APK with Gradle
+      - name: Export compatibility APK with Gradle
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p source/build
           godot --headless --verbose --path source \
-            --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android-touchfix.apk"
-          test -s source/build/desksaw-android-touchfix.apk
-          ls -lh source/build/desksaw-android-touchfix.apk
+            --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android-touchfix-compat.apk"
+          test -s source/build/desksaw-android-touchfix-compat.apk
+          ls -lh source/build/desksaw-android-touchfix-compat.apk
 
-      - name: Upload touch-fix APK
+      - name: Verify APK signing, alignment and package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$GITHUB_WORKSPACE/source/build/desksaw-android-touchfix-compat.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.1/apksigner"
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.1/zipalign"
+          AAPT="$ANDROID_HOME/build-tools/35.0.1/aapt"
+
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee source/build/apksigner.txt
+          "$ZIPALIGN" -c -P 16 -v 4 "$APK" | tee source/build/zipalign.txt
+          "$AAPT" dump badging "$APK" | tee source/build/badging.txt
+
+          grep -q "package: name='org.deedee14.desksaw.pet'" source/build/badging.txt
+          grep -q "sdkVersion:'24'" source/build/badging.txt
+          grep -q "targetSdkVersion:'33'" source/build/badging.txt
+          grep -q "application-label:'deskSaw'" source/build/badging.txt
+
+      - name: Upload compatibility APK
         uses: actions/upload-artifact@v4
         with:
-          name: desksaw-android-touchfix-apk
-          path: source/build/desksaw-android-touchfix.apk
+          name: desksaw-android-touchfix-compat-apk
+          path: |
+            source/build/desksaw-android-touchfix-compat.apk
+            source/build/apksigner.txt
+            source/build/zipalign.txt
+            source/build/badging.txt
           if-no-files-found: error
           retention-days: 14
