@@ -16,7 +16,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout build harness
@@ -31,11 +31,30 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK packages required by Godot 4.7
         shell: bash
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "build-tools;35.0.1" "platforms;android-35"
+          sdkmanager --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
+            "build-tools;35.0.1" \
+            "platforms;android-35" \
+            "cmdline-tools;latest"
+
+      - name: Setup Godot 4.7 and export templates
+        uses: solarlabyrinth/action-setup-godot@v3
+        with:
+          version: 4.7-stable
+          csharp: false
+          export-templates: true
+
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          godot --version
+          java -version
+          test -x "$ANDROID_HOME/platform-tools/adb"
+          test -d "$ANDROID_HOME/build-tools/35.0.1"
 
       - name: Reassemble Android port patch
         shell: bash
@@ -53,32 +72,15 @@ jobs:
           git -C source checkout --detach FETCH_HEAD
           git -C source apply --check "$RUNNER_TEMP/android-port.patch"
           git -C source apply "$RUNNER_TEMP/android-port.patch"
+
+          # The first port preset accidentally hid the app from Android launchers.
+          sed -i 's#package/show_as_launcher_app=false#package/show_as_launcher_app=true#' source/export_presets.cfg
+
           grep -q 'platform="Android"' source/export_presets.cfg
+          grep -q 'package/show_as_launcher_app=true' source/export_presets.cfg
           grep -q 'TransparentWindowCompat.gd' source/project.godot
 
-      - name: Download Godot 4.7 and export templates
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/godot" "$RUNNER_TEMP/templates"
-          curl -fL 'https://downloads.godotengine.org/?flavor=stable&platform=linux.64&slug=linux.x86_64.zip&version=4.7' -o "$RUNNER_TEMP/godot.zip"
-          unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
-          GODOT_BIN="$(find "$RUNNER_TEMP/godot" -maxdepth 1 -type f -name 'Godot_v4.7-stable_linux.x86_64*' | head -n1)"
-          test -n "$GODOT_BIN"
-          chmod +x "$GODOT_BIN"
-          echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
-
-          curl -fL 'https://downloads.godotengine.org/?flavor=stable&platform=templates&slug=export_templates.tpz&version=4.7' -o "$RUNNER_TEMP/export_templates.tpz"
-          unzip -q "$RUNNER_TEMP/export_templates.tpz" -d "$RUNNER_TEMP/templates"
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.7.stable"
-          mkdir -p "$TEMPLATE_DIR"
-          if [ -d "$RUNNER_TEMP/templates/templates" ]; then
-            cp -a "$RUNNER_TEMP/templates/templates/." "$TEMPLATE_DIR/"
-          else
-            cp -a "$RUNNER_TEMP/templates/." "$TEMPLATE_DIR/"
-          fi
-          test -f "$TEMPLATE_DIR/android_debug.apk"
-
-      - name: Configure Godot Android export
+      - name: Configure Android signing and Godot editor paths
         shell: bash
         run: |
           mkdir -p "$HOME/.android" "$HOME/.config/godot"
@@ -90,7 +92,8 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
+          # Godot 4.x reads editor_settings-4.tres (not editor_settings-4.7.tres).
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
           [gd_resource type="EditorSettings" format=3]
 
           [resource]
@@ -108,13 +111,14 @@ jobs:
       - name: Import project
         shell: bash
         run: |
-          "$GODOT_BIN" --headless --path source --import
+          godot --headless --path source --import
 
       - name: Export debug APK
         shell: bash
         run: |
           mkdir -p source/build
-          "$GODOT_BIN" --headless --path source --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android.apk"
+          godot --headless --verbose --path source \
+            --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android.apk"
           test -s source/build/desksaw-android.apk
           ls -lh source/build/desksaw-android.apk
 
