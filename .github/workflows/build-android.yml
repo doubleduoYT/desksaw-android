@@ -1,0 +1,125 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-android.yml"
+      - "patches/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout build harness
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "build-tools;35.0.1" "platforms;android-35"
+
+      - name: Reassemble Android port patch
+        shell: bash
+        run: |
+          cat patches/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/android-port.patch"
+          test "$(wc -c < "$RUNNER_TEMP/android-port.patch")" -eq 12544
+          grep -q "TransparentWindowCompat.gd" "$RUNNER_TEMP/android-port.patch"
+
+      - name: Fetch pinned deskSaw source and apply Android patch
+        shell: bash
+        run: |
+          git init source
+          git -C source remote add origin https://github.com/dee-dee-catorce/desksaw.git
+          git -C source fetch --depth=1 origin e3acdd3f8f28de02573a3647c7ab82a6ba1cdb0a
+          git -C source checkout --detach FETCH_HEAD
+          git -C source apply --check "$RUNNER_TEMP/android-port.patch"
+          git -C source apply "$RUNNER_TEMP/android-port.patch"
+          grep -q 'platform="Android"' source/export_presets.cfg
+          grep -q 'TransparentWindowCompat.gd' source/project.godot
+
+      - name: Download Godot 4.7 and export templates
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/godot" "$RUNNER_TEMP/templates"
+          curl -fL 'https://downloads.godotengine.org/?flavor=stable&platform=linux.64&slug=linux.x86_64.zip&version=4.7' -o "$RUNNER_TEMP/godot.zip"
+          unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
+          GODOT_BIN="$(find "$RUNNER_TEMP/godot" -maxdepth 1 -type f -name 'Godot_v4.7-stable_linux.x86_64*' | head -n1)"
+          test -n "$GODOT_BIN"
+          chmod +x "$GODOT_BIN"
+          echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
+
+          curl -fL 'https://downloads.godotengine.org/?flavor=stable&platform=templates&slug=export_templates.tpz&version=4.7' -o "$RUNNER_TEMP/export_templates.tpz"
+          unzip -q "$RUNNER_TEMP/export_templates.tpz" -d "$RUNNER_TEMP/templates"
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.7.stable"
+          mkdir -p "$TEMPLATE_DIR"
+          if [ -d "$RUNNER_TEMP/templates/templates" ]; then
+            cp -a "$RUNNER_TEMP/templates/templates/." "$TEMPLATE_DIR/"
+          else
+            cp -a "$RUNNER_TEMP/templates/." "$TEMPLATE_DIR/"
+          fi
+          test -f "$TEMPLATE_DIR/android_debug.apk"
+
+      - name: Configure Godot Android export
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.android" "$HOME/.config/godot"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -noprompt \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/.android/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
+
+      - name: Import project
+        shell: bash
+        run: |
+          "$GODOT_BIN" --headless --path source --import
+
+      - name: Export debug APK
+        shell: bash
+        run: |
+          mkdir -p source/build
+          "$GODOT_BIN" --headless --path source --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android.apk"
+          test -s source/build/desksaw-android.apk
+          ls -lh source/build/desksaw-android.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: desksaw-android-apk
+          path: source/build/desksaw-android.apk
+          if-no-files-found: error
+          retention-days: 14
