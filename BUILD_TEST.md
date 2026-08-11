@@ -11,3 +11,5 @@ Overlay v2 trigger: foreground desktop-pet service + Gradle build.
 UID cache trigger: import before Gradle template install.
 
 Fast template trigger: resolve main scene UID as res://scenes/loading.tscn.
+
+Direct template trigger: unzip android_source.zip without editor installer.
