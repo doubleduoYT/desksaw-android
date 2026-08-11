@@ -1,0 +1,88 @@
+--- a/Scripts/impo/dragExp.gd
++++ b/Scripts/impo/dragExp.gd
+@@ -20,6 +20,7 @@
+ var _mobile_pending_body: RigidBody2D
+ var _mobile_touch_start_pos := Vector2.ZERO
+ var _android_overlay: Object = null
++var _android_region_ids: Dictionary = {}
+ 
+ const MOBILE_DRAG_THRESHOLD := 12.0
+ const MOBILE_TOUCH_MARGIN := 12.0
+@@ -59,7 +60,7 @@
+ 	if _use_x11_input_regions:
+ 		_update_x11_input_regions()
+ 	if _android_overlay:
+-		_update_android_touch_region()
++		_update_android_touch_regions()
+ 
+ 	# On Android a press starts as a possible pet. It becomes a drag only after
+ 	# the finger actually moves far enough, so a normal tap never yanks the limb.
+@@ -111,27 +112,45 @@
+ 		)
+ 
+ 
+-func _update_android_touch_region() -> void:
++func _android_region_id(body: RigidBody2D) -> String:
++	return "%s:%s" % [str(get_instance_id()), str(body.get_instance_id())]
++
++func _update_android_touch_regions() -> void:
+ 	if not _android_overlay:
+ 		return
+ 
+-	var combined := Rect2()
+-	var found := false
++	# Do NOT merge every limb into one rectangle. A merged bounding box also
++	# intercepts all of the transparent space between separated limbs (and can
++	# become enormous if a limb is flung away). Keep one tiny WindowManager
++	# touch proxy per rigid body so only the actual pet is interactive.
++	var live_regions: Dictionary = {}
+ 	for child in rigid_bodies_container.get_children():
+ 		if child is not RigidBody2D or not child.is_visible_in_tree():
+ 			continue
+-		var rect := _get_body_input_rect(child as RigidBody2D)
++
++		var body := child as RigidBody2D
++		var rect := _get_body_input_rect(body)
+ 		if not rect.has_area():
+ 			continue
+-		combined = combined.merge(rect) if found else rect
+-		found = true
+ 
+-	var region_id := str(get_instance_id())
+-	if found:
+-		combined = combined.grow(MOBILE_TOUCH_MARGIN)
+-		_android_overlay.setTouchRegion(region_id, combined.position.x, combined.position.y, combined.size.x, combined.size.y)
+-	else:
+-		_android_overlay.removeTouchRegion(region_id)
++		var region_id := _android_region_id(body)
++		live_regions[region_id] = true
++		rect = rect.grow(MOBILE_TOUCH_MARGIN)
++		_android_overlay.setTouchRegion(
++			region_id,
++			rect.position.x,
++			rect.position.y,
++			rect.size.x,
++			rect.size.y
++		)
++
++	# Remove proxies for deleted/hidden limbs immediately. Leaving one stale
++	# invisible proxy behind is enough to create a mysterious dead touch zone.
++	for old_region_id in _android_region_ids.keys():
++		if not live_regions.has(old_region_id):
++			_android_overlay.removeTouchRegion(str(old_region_id))
++
++	_android_region_ids = live_regions
+ 
+ func _get_body_input_rect(body: RigidBody2D) -> Rect2:
+ 	var result := Rect2()
+@@ -213,7 +232,9 @@
+ 	for region_id in _x11_region_ids:
+ 		TransparentWindow.RemoveInputRect(region_id)
+ 	if _android_overlay:
+-		_android_overlay.removeTouchRegion(str(get_instance_id()))
++		for region_id in _android_region_ids.keys():
++			_android_overlay.removeTouchRegion(str(region_id))
++		_android_region_ids.clear()
+ 
+ 	if _is_contributing:
+ 		_is_contributing = false
