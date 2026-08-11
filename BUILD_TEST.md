@@ -23,3 +23,5 @@ ZIP CRC trigger: validate archive contents instead of byte-identical metadata.
 V4 chunk trigger: rebuild exact overlay payload from six connector-safe chunks.
 
 Per-chunk diagnostic trigger: verify exact length and SHA for all six v4 chunks.
+
+Split-003 trigger: verify 003 as six 1000-character chunks and then rebuild APK.
