@@ -73,12 +73,35 @@ jobs:
           git -C source apply --check "$RUNNER_TEMP/android-port.patch"
           git -C source apply "$RUNNER_TEMP/android-port.patch"
 
-          # The first port preset accidentally hid the app from Android launchers.
+          # The upstream tree references godot-console, but its addon files are not
+          # present in the source checkout. Restore the addon and use a stable path
+          # for the Console autoload instead of relying on a missing UID cache.
+          rm -rf source/addons/godot-console
+          git clone --depth=1 https://github.com/4d49/godot-console.git source/addons/godot-console
+          sed -i 's#Console="\*uid://dc5wc5117h2vk"#Console="*res://addons/godot-console/scripts/console.gd"#' source/project.godot
+
+          # Android port is intentionally a normal opaque full-screen app. Keeping
+          # the desktop transparent-window flags makes Godot require a Gradle build.
+          sed -i 's#window/size/transparent=true#window/size/transparent=false#' source/project.godot
+          sed -i 's#window/per_pixel_transparency/allowed=true#window/per_pixel_transparency/allowed=false#' source/project.godot
+
+          # Standard template export does not use Gradle. Min/Target SDK overrides
+          # are Gradle-only in Godot 4.7, so remove those overrides and use the
+          # template defaults instead.
+          sed -i '/^gradle_build\/min_sdk=/d' source/export_presets.cfg
+          sed -i '/^gradle_build\/target_sdk=/d' source/export_presets.cfg
+
+          # Make the APK visible in the Android launcher.
           sed -i 's#package/show_as_launcher_app=false#package/show_as_launcher_app=true#' source/export_presets.cfg
 
           grep -q 'platform="Android"' source/export_presets.cfg
           grep -q 'package/show_as_launcher_app=true' source/export_presets.cfg
-          grep -q 'TransparentWindowCompat.gd' source/project.godot
+          grep -q 'window/size/transparent=false' source/project.godot
+          grep -q 'window/per_pixel_transparency/allowed=false' source/project.godot
+          grep -q 'Console="\*res://addons/godot-console/scripts/console.gd"' source/project.godot
+          test -f source/addons/godot-console/scripts/console.gd
+          ! grep -q '^gradle_build/min_sdk=' source/export_presets.cfg
+          ! grep -q '^gradle_build/target_sdk=' source/export_presets.cfg
 
       - name: Configure Android signing and Godot editor paths
         shell: bash
@@ -92,8 +115,8 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          # Godot 4.x reads editor_settings-4.tres (not editor_settings-4.7.tres).
-          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          # action-setup-godot/Godot 4.7 loads editor_settings-4.7.tres in CI.
+          cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
           [gd_resource type="EditorSettings" format=3]
 
           [resource]
@@ -103,6 +126,7 @@ jobs:
           export/android/debug_keystore_user = "androiddebugkey"
           export/android/debug_keystore_pass = "android"
           EOF
+          cp "$HOME/.config/godot/editor_settings-4.7.tres" "$HOME/.config/godot/editor_settings-4.tres"
 
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
@@ -111,7 +135,7 @@ jobs:
       - name: Import project
         shell: bash
         run: |
-          godot --headless --path source --import
+          godot --headless --verbose --path source --import
 
       - name: Export debug APK
         shell: bash
