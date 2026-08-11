@@ -110,6 +110,13 @@ jobs:
           mkdir -p source/android/build
           unzip -q "$TEMPLATE_ZIP" -d source/android/build
 
+          # Godot's Project > Install Android Build Template action writes this
+          # marker beside android/build. Without it, export aborts before Gradle.
+          TEMPLATE_VERSION="$(basename "$(dirname "$TEMPLATE_ZIP")")"
+          printf '%s\n' "$TEMPLATE_VERSION" > source/android/.build_version
+          echo "Installed Android build template version: $TEMPLATE_VERSION"
+
+          test -s source/android/.build_version
           test -f source/android/build/build.gradle
           test -f source/android/build/src/main/AndroidManifest.xml
           find source/android/build -path '*/com/godot/game/GodotApp.java' -print -quit | grep -q .
