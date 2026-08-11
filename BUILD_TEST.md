@@ -7,3 +7,5 @@ Synchronization trigger: Android build diagnostic.
 Toolchain hardening trigger: Godot 4.x settings + launcher fix.
 
 Overlay v2 trigger: foreground desktop-pet service + Gradle build.
+
+UID cache trigger: import before Gradle template install.
