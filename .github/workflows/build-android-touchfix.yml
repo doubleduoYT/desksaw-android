@@ -1,0 +1,158 @@
+name: Build Android Touch-Fix APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: desksaw-touchfix-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout build harness
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
+            "build-tools;35.0.1" \
+            "platforms;android-35" \
+            "cmdline-tools;latest" \
+            "cmake;3.10.2.4988404" \
+            "ndk;28.1.13356709"
+
+      - name: Setup Godot 4.7 and export templates
+        uses: solarlabyrinth/action-setup-godot@v3
+        with:
+          version: 4.7-stable
+          csharp: false
+          export-templates: true
+
+      - name: Reassemble patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat patches/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/android-port.patch"
+          test "$(wc -c < "$RUNNER_TEMP/android-port.patch")" -eq 12544
+
+          cat overlay/v4/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/desksaw-overlay-v4.zip"
+          echo "5f17050522874a65b1fab3451cb8c06c397efb740746a0a880a1eac44705c2c5  $RUNNER_TEMP/desksaw-overlay-v4.zip" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/desksaw-overlay-v4"
+          unzip -q "$RUNNER_TEMP/desksaw-overlay-v4.zip" -d "$RUNNER_TEMP/desksaw-overlay-v4"
+
+      - name: Fetch deskSaw and apply Android port
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source remote add origin https://github.com/dee-dee-catorce/desksaw.git
+          git -C source fetch --depth=1 origin e3acdd3f8f28de02573a3647c7ab82a6ba1cdb0a
+          git -C source checkout --detach FETCH_HEAD
+          git -C source apply "$RUNNER_TEMP/android-port.patch"
+
+          rm -rf source/addons/godot-console
+          git clone --depth=1 https://github.com/4d49/godot-console.git source/addons/godot-console
+          sed -i 's#Console="\*uid://dc5wc5117h2vk"#Console="*res://addons/godot-console/scripts/console.gd"#' source/project.godot
+
+      - name: Install official Godot Gradle template
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEMPLATE_ZIP="$(find "$HOME/.local/share/godot/export_templates" -name android_source.zip -print -quit)"
+          test -f "$TEMPLATE_ZIP"
+          rm -rf source/android/build
+          mkdir -p source/android/build
+          unzip -q "$TEMPLATE_ZIP" -d source/android/build
+          TEMPLATE_VERSION="$(basename "$(dirname "$TEMPLATE_ZIP")")"
+          printf '%s\n' "$TEMPLATE_VERSION" > source/android/.build_version
+          test -s source/android/.build_version
+
+      - name: Apply desktop-pet overlay and touch passthrough fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$RUNNER_TEMP/desksaw-overlay-v4/apply_android_overlay.py" \
+            "$GITHUB_WORKSPACE/source" \
+            "$GITHUB_WORKSPACE/source/android/build"
+
+          git -C source apply "$GITHUB_WORKSPACE/overlay/v5/touch-passthrough.patch"
+
+          grep -q '_update_android_touch_regions' source/Scripts/impo/dragExp.gd
+          grep -q '_android_region_ids' source/Scripts/impo/dragExp.gd
+          if grep -q 'combined = combined.merge' source/Scripts/impo/dragExp.gd; then
+            echo 'Old merged Android touch rectangle is still present' >&2
+            exit 1
+          fi
+          grep -q 'FLAG_NOT_TOUCHABLE' "$(find source/android/build -name DeskSawOverlayService.java -print -quit)"
+
+      - name: Configure signing and Godot Android paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android" "$HOME/.config/godot"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -noprompt \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/.android/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+          cp "$HOME/.config/godot/editor_settings-4.7.tres" "$HOME/.config/godot/editor_settings-4.tres"
+
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
+
+      - name: Import project and validate GDScript
+        shell: bash
+        run: |
+          godot --headless --verbose --path source --import
+
+      - name: Export touch-fix APK with Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source/build
+          godot --headless --verbose --path source \
+            --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android-touchfix.apk"
+          test -s source/build/desksaw-android-touchfix.apk
+          ls -lh source/build/desksaw-android-touchfix.apk
+
+      - name: Upload touch-fix APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: desksaw-android-touchfix-apk
+          path: source/build/desksaw-android-touchfix.apk
+          if-no-files-found: error
+          retention-days: 14
