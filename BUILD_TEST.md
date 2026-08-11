@@ -9,3 +9,5 @@ Toolchain hardening trigger: Godot 4.x settings + launcher fix.
 Overlay v2 trigger: foreground desktop-pet service + Gradle build.
 
 UID cache trigger: import before Gradle template install.
+
+Fast template trigger: resolve main scene UID as res://scenes/loading.tscn.
