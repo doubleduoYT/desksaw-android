@@ -122,8 +122,8 @@ jobs:
             "$GITHUB_WORKSPACE/source/android/build"
 
           grep -q 'gradle_build/use_gradle_build=true' source/export_presets.cfg
-          grep -q 'gradle_build/min_sdk=24' source/export_presets.cfg
-          grep -q 'gradle_build/target_sdk=35' source/export_presets.cfg
+          grep -q 'gradle_build/min_sdk="24"' source/export_presets.cfg
+          grep -q 'gradle_build/target_sdk="35"' source/export_presets.cfg
           grep -q 'window/size/transparent=true' source/project.godot
           grep -q 'window/per_pixel_transparency/allowed=true' source/project.godot
           grep -q 'window/handheld/orientation=6' source/project.godot
