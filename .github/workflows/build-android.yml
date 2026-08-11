@@ -42,8 +42,8 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager --sdk_root="$ANDROID_HOME" \
             "platform-tools" \
-            "build-tools;35.0.1" \
-            "platforms;android-35" \
+            "build-tools;36.0.0" \
+            "platforms;android-36" \
             "cmdline-tools;latest" \
             "cmake;3.10.2.4988404" \
             "ndk;28.1.13356709"
@@ -94,7 +94,7 @@ jobs:
           printf '%s\n' "$TEMPLATE_VERSION" > source/android/.build_version
           test -s source/android/.build_version
 
-      - name: Apply desktop-pet overlay and touch/install compatibility fixes
+      - name: Apply Android overlay runtime fixes
         shell: bash
         run: |
           set -euo pipefail
@@ -106,19 +106,28 @@ jobs:
           python "$GITHUB_WORKSPACE/overlay/v5/compat-install.py" \
             "$GITHUB_WORKSPACE/source" \
             "$GITHUB_WORKSPACE/source/android/build"
+          python "$GITHUB_WORKSPACE/overlay/v6/runtime-input.py" \
+            "$GITHUB_WORKSPACE/source" \
+            "$GITHUB_WORKSPACE/source/android/build"
 
+          SERVICE="$(find source/android/build -name DeskSawOverlayService.java -print -quit)"
+          test -f "$SERVICE"
           grep -q '_update_android_touch_regions' source/Scripts/impo/dragExp.gd
           grep -q '_android_region_ids' source/Scripts/impo/dragExp.gd
+          grep -q 'MOBILE_TOUCH_MAX_SIDE' source/Scripts/impo/dragExp.gd
           if grep -q 'combined = combined.merge' source/Scripts/impo/dragExp.gd; then
             echo 'Old merged Android touch rectangle is still present' >&2
             exit 1
           fi
-          grep -q 'FLAG_NOT_TOUCHABLE' "$(find source/android/build -name DeskSawOverlayService.java -print -quit)"
+          grep -q 'FLAG_NOT_TOUCHABLE' "$SERVICE"
+          grep -q 'getMaximumObscuringOpacityForTouch' "$SERVICE"
+          grep -q 'gestureActive' "$SERVICE"
+          grep -q 'params.alpha = 0.01f' "$SERVICE"
           grep -q 'package/unique_name="org.deedee14.desksaw.pet"' source/export_presets.cfg
-          grep -q 'gradle_build/target_sdk="33"' source/export_presets.cfg
-          ! grep -q 'FOREGROUND_SERVICE_SPECIAL_USE' source/android/build/src/main/AndroidManifest.xml
-          ! grep -q 'foregroundServiceType="specialUse"' source/android/build/src/main/AndroidManifest.xml
-          ! grep -q 'PROPERTY_SPECIAL_USE_FGS_SUBTYPE' source/android/build/src/main/AndroidManifest.xml
+          grep -q 'gradle_build/target_sdk="36"' source/export_presets.cfg
+          grep -q 'version/name="0.2.1"' source/export_presets.cfg
+          grep -q 'FOREGROUND_SERVICE_SPECIAL_USE' source/android/build/src/main/AndroidManifest.xml
+          grep -q 'foregroundServiceType="specialUse"' source/android/build/src/main/AndroidManifest.xml
           ! grep -q 'android.intent.category.HOME' source/android/build/src/main/AndroidManifest.xml
 
       - name: Configure persistent signing and Godot Android paths
@@ -166,9 +175,9 @@ jobs:
         run: |
           set -euo pipefail
           APK="$GITHUB_WORKSPACE/source/build/desksaw-android.apk"
-          APKSIGNER="$ANDROID_HOME/build-tools/35.0.1/apksigner"
-          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.1/zipalign"
-          AAPT="$ANDROID_HOME/build-tools/35.0.1/aapt"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          ZIPALIGN="$ANDROID_HOME/build-tools/36.0.0/zipalign"
+          AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
 
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee source/build/apksigner.txt
           "$ZIPALIGN" -c -P 16 -v 4 "$APK" | tee source/build/zipalign.txt
@@ -176,7 +185,7 @@ jobs:
 
           grep -q "package: name='org.deedee14.desksaw.pet'" source/build/badging.txt
           grep -q "sdkVersion:'24'" source/build/badging.txt
-          grep -q "targetSdkVersion:'33'" source/build/badging.txt
+          grep -q "targetSdkVersion:'36'" source/build/badging.txt
           grep -q "application-label:'deskSaw'" source/build/badging.txt
 
       - name: Upload APK
