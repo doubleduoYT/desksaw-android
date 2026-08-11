@@ -11,6 +11,12 @@ on:
   pull_request:
     branches: [main]
 
+# Keep one build per branch/PR. New fixes cancel stale CI runs that may be
+# blocked inside an older Godot headless invocation.
+concurrency:
+  group: desksaw-android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
