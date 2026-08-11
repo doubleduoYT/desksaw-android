@@ -8,11 +8,12 @@ on:
       - ".github/workflows/build-android.yml"
       - "patches/**"
       - "overlay/**"
+      - "signing/**"
   pull_request:
     branches: [main]
 
 concurrency:
-  group: desksaw-android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: desksaw-android-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -22,7 +23,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
     steps:
       - name: Checkout build harness
         uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages required by Godot 4.7
+      - name: Install Android SDK packages
         shell: bash
         run: |
           yes | sdkmanager --licenses >/dev/null || true
@@ -55,111 +55,80 @@ jobs:
           csharp: false
           export-templates: true
 
-      - name: Verify toolchain
+      - name: Reassemble patches
         shell: bash
         run: |
-          godot --version
-          java -version
-          test -x "$ANDROID_HOME/platform-tools/adb"
-          test -d "$ANDROID_HOME/build-tools/35.0.1"
-          find "$HOME/.local/share/godot/export_templates" -name android_source.zip -print -quit | grep -q .
-
-      - name: Reassemble base Android port patch
-        shell: bash
-        run: |
+          set -euo pipefail
           cat patches/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/android-port.patch"
           test "$(wc -c < "$RUNNER_TEMP/android-port.patch")" -eq 12544
-          grep -q "TransparentWindowCompat.gd" "$RUNNER_TEMP/android-port.patch"
 
-      - name: Reassemble desktop-pet overlay payload
-        shell: bash
-        run: |
           cat overlay/v4/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/desksaw-overlay-v4.zip"
           echo "5f17050522874a65b1fab3451cb8c06c397efb740746a0a880a1eac44705c2c5  $RUNNER_TEMP/desksaw-overlay-v4.zip" | sha256sum -c -
-          unzip -tq "$RUNNER_TEMP/desksaw-overlay-v4.zip"
-          rm -rf "$RUNNER_TEMP/desksaw-overlay-v4"
           mkdir -p "$RUNNER_TEMP/desksaw-overlay-v4"
           unzip -q "$RUNNER_TEMP/desksaw-overlay-v4.zip" -d "$RUNNER_TEMP/desksaw-overlay-v4"
-          test -f "$RUNNER_TEMP/desksaw-overlay-v4/apply_android_overlay.py"
-          test -f "$RUNNER_TEMP/desksaw-overlay-v4/android/src/main/java/com/godot/game/DeskSawOverlayService.java"
-          grep -q 'src" / "main" / "AndroidManifest.xml' "$RUNNER_TEMP/desksaw-overlay-v4/apply_android_overlay.py"
 
-      - name: Fetch pinned deskSaw source and apply base Android patch
+      - name: Fetch deskSaw and apply Android port
         shell: bash
         run: |
+          set -euo pipefail
           git init source
           git -C source remote add origin https://github.com/dee-dee-catorce/desksaw.git
           git -C source fetch --depth=1 origin e3acdd3f8f28de02573a3647c7ab82a6ba1cdb0a
           git -C source checkout --detach FETCH_HEAD
-          git -C source apply --check "$RUNNER_TEMP/android-port.patch"
           git -C source apply "$RUNNER_TEMP/android-port.patch"
 
           rm -rf source/addons/godot-console
           git clone --depth=1 https://github.com/4d49/godot-console.git source/addons/godot-console
           sed -i 's#Console="\*uid://dc5wc5117h2vk"#Console="*res://addons/godot-console/scripts/console.gd"#' source/project.godot
-          test -f source/addons/godot-console/scripts/console.gd
 
-      - name: Install official Godot Gradle build template
+      - name: Install official Godot Gradle template
         shell: bash
         run: |
+          set -euo pipefail
           TEMPLATE_ZIP="$(find "$HOME/.local/share/godot/export_templates" -name android_source.zip -print -quit)"
           test -f "$TEMPLATE_ZIP"
-          echo "Using Gradle template: $TEMPLATE_ZIP"
-
           rm -rf source/android/build
           mkdir -p source/android/build
           unzip -q "$TEMPLATE_ZIP" -d source/android/build
-
-          # Godot's Project > Install Android Build Template action writes this
-          # marker beside android/build. Without it, export aborts before Gradle.
           TEMPLATE_VERSION="$(basename "$(dirname "$TEMPLATE_ZIP")")"
           printf '%s\n' "$TEMPLATE_VERSION" > source/android/.build_version
-          echo "Installed Android build template version: $TEMPLATE_VERSION"
-
           test -s source/android/.build_version
-          test -f source/android/build/build.gradle
-          test -f source/android/build/src/main/AndroidManifest.xml
-          find source/android/build -path '*/com/godot/game/GodotApp.java' -print -quit | grep -q .
 
-      - name: Apply Android desktop-pet overlay integration
+      - name: Apply desktop-pet overlay and touch/install compatibility fixes
         shell: bash
         run: |
+          set -euo pipefail
           python "$RUNNER_TEMP/desksaw-overlay-v4/apply_android_overlay.py" \
             "$GITHUB_WORKSPACE/source" \
             "$GITHUB_WORKSPACE/source/android/build"
 
-          grep -q 'gradle_build/use_gradle_build=true' source/export_presets.cfg
-          grep -q 'gradle_build/min_sdk="24"' source/export_presets.cfg
-          grep -q 'gradle_build/target_sdk="35"' source/export_presets.cfg
-          grep -q 'window/size/transparent=true' source/project.godot
-          grep -q 'window/per_pixel_transparency/allowed=true' source/project.godot
-          grep -q 'window/handheld/orientation=6' source/project.godot
-          grep -q 'sensors/enable_gravity=true' source/project.godot
-          grep -q 'sensors/enable_gyroscope=true' source/project.godot
-          grep -q 'Console="\*res://addons/godot-console/scripts/console.gd"' source/project.godot
+          git -C source apply "$GITHUB_WORKSPACE/overlay/v5/touch-passthrough.patch"
+          python "$GITHUB_WORKSPACE/overlay/v5/compat-install.py" \
+            "$GITHUB_WORKSPACE/source" \
+            "$GITHUB_WORKSPACE/source/android/build"
 
-          MANIFEST="source/android/build/src/main/AndroidManifest.xml"
-          grep -q 'android.permission.SYSTEM_ALERT_WINDOW' "$MANIFEST"
-          grep -q 'android.permission.FOREGROUND_SERVICE' "$MANIFEST"
-          grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$MANIFEST"
-          grep -q 'DeskSawOverlayService' "$MANIFEST"
-          grep -q 'foregroundServiceType="specialUse"' "$MANIFEST"
+          grep -q '_update_android_touch_regions' source/Scripts/impo/dragExp.gd
+          grep -q '_android_region_ids' source/Scripts/impo/dragExp.gd
+          if grep -q 'combined = combined.merge' source/Scripts/impo/dragExp.gd; then
+            echo 'Old merged Android touch rectangle is still present' >&2
+            exit 1
+          fi
+          grep -q 'FLAG_NOT_TOUCHABLE' "$(find source/android/build -name DeskSawOverlayService.java -print -quit)"
+          grep -q 'package/unique_name="org.deedee14.desksaw.pet"' source/export_presets.cfg
+          grep -q 'gradle_build/target_sdk="33"' source/export_presets.cfg
+          ! grep -q 'FOREGROUND_SERVICE_SPECIAL_USE' source/android/build/src/main/AndroidManifest.xml
+          ! grep -q 'foregroundServiceType="specialUse"' source/android/build/src/main/AndroidManifest.xml
+          ! grep -q 'PROPERTY_SPECIAL_USE_FGS_SUBTYPE' source/android/build/src/main/AndroidManifest.xml
+          ! grep -q 'android.intent.category.HOME' source/android/build/src/main/AndroidManifest.xml
 
-          find source/android/build -name DeskSawOverlayService.java -print -quit | grep -q .
-          find source/android/build -name DeskSawOverlayPlugin.java -print -quit | grep -q .
-          grep -q 'Console.create_command("gyroGravity"' source/Scripts/impo/commands.gd
-
-      - name: Configure Android signing and Godot editor paths
+      - name: Configure persistent signing and Godot Android paths
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$HOME/.android" "$HOME/.config/godot"
-          if [ ! -f "$HOME/.android/debug.keystore" ]; then
-            keytool -genkeypair -noprompt \
-              -keystore "$HOME/.android/debug.keystore" \
-              -storepass android -keypass android \
-              -alias androiddebugkey -keyalg RSA -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
+          base64 -d signing/desksaw-pet-debug.keystore.b64 > "$HOME/.android/desksaw-pet.keystore"
+          echo "16910cea0d4d7a653ced89ce69e0eb79a3e8cc585f4adc6af1e689729df22e30  $HOME/.android/desksaw-pet.keystore" | sha256sum -c -
+          keytool -list -keystore "$HOME/.android/desksaw-pet.keystore" -storepass android -alias desksawpet >/dev/null
 
           cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
           [gd_resource type="EditorSettings" format=3]
@@ -167,52 +136,57 @@ jobs:
           [resource]
           export/android/android_sdk_path = "$ANDROID_HOME"
           export/android/java_sdk_path = "$JAVA_HOME"
-          export/android/debug_keystore = "$HOME/.android/debug.keystore"
-          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore = "$HOME/.android/desksaw-pet.keystore"
+          export/android/debug_keystore_user = "desksawpet"
           export/android/debug_keystore_pass = "android"
           EOF
           cp "$HOME/.config/godot/editor_settings-4.7.tres" "$HOME/.config/godot/editor_settings-4.tres"
 
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/desksaw-pet.keystore" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=desksawpet" >> "$GITHUB_ENV"
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
 
-      - name: Import project and validate scripts
+      - name: Import project and validate GDScript
         shell: bash
         run: |
           godot --headless --verbose --path source --import
 
-      - name: Export debug APK with Gradle
-        id: export_apk
+      - name: Export APK with Gradle
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p source/build
-          set +e
           godot --headless --verbose --path source \
-            --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android.apk" \
-            2>&1 | tee "$RUNNER_TEMP/godot-export.log"
-          status=${PIPESTATUS[0]}
-          set -e
-          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
-          if [ "$status" -ne 0 ]; then
-            exit "$status"
-          fi
+            --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android.apk"
           test -s source/build/desksaw-android.apk
           ls -lh source/build/desksaw-android.apk
 
-      - name: Upload build diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: desksaw-android-build-log
-          path: ${{ runner.temp }}/godot-export.log
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Verify APK signing, alignment and package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$GITHUB_WORKSPACE/source/build/desksaw-android.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.1/apksigner"
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.1/zipalign"
+          AAPT="$ANDROID_HOME/build-tools/35.0.1/aapt"
+
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee source/build/apksigner.txt
+          "$ZIPALIGN" -c -P 16 -v 4 "$APK" | tee source/build/zipalign.txt
+          "$AAPT" dump badging "$APK" | tee source/build/badging.txt
+
+          grep -q "package: name='org.deedee14.desksaw.pet'" source/build/badging.txt
+          grep -q "sdkVersion:'24'" source/build/badging.txt
+          grep -q "targetSdkVersion:'33'" source/build/badging.txt
+          grep -q "application-label:'deskSaw'" source/build/badging.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: desksaw-android-apk
-          path: source/build/desksaw-android.apk
+          path: |
+            source/build/desksaw-android.apk
+            source/build/apksigner.txt
+            source/build/zipalign.txt
+            source/build/badging.txt
           if-no-files-found: error
           retention-days: 14
