@@ -1,0 +1,50 @@
+name: Verify Overlay V4 Payload
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "overlay/v4/**"
+      - ".github/workflows/verify-overlay-v4.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify every connector-safe chunk
+        shell: bash
+        run: |
+          set -euo pipefail
+          names=(000 001 002 003 004 005)
+          lengths=(6000 6000 6000 6000 6000 1328)
+          hashes=(
+            ceffa1311946a79b01ff81312c027cfd09c8328f34b1691514eba7f4cd95f9f4
+            3aeaeb3937dde27e56046d01aa0cf8f787ec2b17eb15cdb05497ea2fb7215553
+            c745d62ace56b05919347dfdb5be1c9b214d4101e9203b57a1d2a784f0b0e887
+            69ec105171e0f02d0a30dc702a329fc44939b1053bf6d033a44328c69589d4c8
+            bb7978eab6af121fb81b9d07f89b486815c9d943b1d050d2bc8c2b2b031ec2b7
+            468918edcb4f22fae7a68bc03440000bddc6dd39f48c52bddc0d4a8f663a19f8
+          )
+
+          for idx in "${!names[@]}"; do
+            f="overlay/v4/chunks/${names[$idx]}.b64"
+            actual_len="$(wc -c < "$f" | tr -d ' ')"
+            actual_sha="$(sha256sum "$f" | awk '{print $1}')"
+            echo "${names[$idx]} length=$actual_len expected=${lengths[$idx]} sha=$actual_sha expected_sha=${hashes[$idx]}"
+            test "$actual_len" -eq "${lengths[$idx]}"
+            test "$actual_sha" = "${hashes[$idx]}"
+          done
+
+      - name: Reassemble and validate ZIP
+        shell: bash
+        run: |
+          cat overlay/v4/chunks/*.b64 | tr -d '\r\n' | base64 -d > overlay-v4.zip
+          sha256sum overlay-v4.zip
+          echo "5f17050522874a65b1fab3451cb8c06c397efb740746a0a880a1eac44705c2c5  overlay-v4.zip" | sha256sum -c -
+          unzip -tq overlay-v4.zip
