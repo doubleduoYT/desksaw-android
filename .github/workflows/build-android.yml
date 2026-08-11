@@ -11,8 +11,6 @@ on:
   pull_request:
     branches: [main]
 
-# Keep one build per branch/PR. New fixes cancel stale CI runs that may be
-# blocked inside an older Godot headless invocation.
 concurrency:
   group: desksaw-android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -76,13 +74,13 @@ jobs:
       - name: Reassemble desktop-pet overlay payload
         shell: bash
         run: |
-          cat overlay/v2/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/desksaw-overlay-v2.zip"
-          echo "2b7083641d03cd2c1d5d72fa18a63399f11c91dd4b4cc9c8f0e586eeff3a9ba6  $RUNNER_TEMP/desksaw-overlay-v2.zip" | sha256sum -c -
-          rm -rf "$RUNNER_TEMP/desksaw-overlay-v2"
-          mkdir -p "$RUNNER_TEMP/desksaw-overlay-v2"
-          unzip -q "$RUNNER_TEMP/desksaw-overlay-v2.zip" -d "$RUNNER_TEMP/desksaw-overlay-v2"
-          test -f "$RUNNER_TEMP/desksaw-overlay-v2/apply_android_overlay.py"
-          test -f "$RUNNER_TEMP/desksaw-overlay-v2/android/src/main/java/com/godot/game/DeskSawOverlayService.java"
+          cat overlay/v3/chunks/*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/desksaw-overlay-v3.zip"
+          echo "5f17050522874a65b1fab3451cb8c06c397efb740746a0a880a1eac44705c2c5  $RUNNER_TEMP/desksaw-overlay-v3.zip" | sha256sum -c -
+          rm -rf "$RUNNER_TEMP/desksaw-overlay-v3"
+          mkdir -p "$RUNNER_TEMP/desksaw-overlay-v3"
+          unzip -q "$RUNNER_TEMP/desksaw-overlay-v3.zip" -d "$RUNNER_TEMP/desksaw-overlay-v3"
+          test -f "$RUNNER_TEMP/desksaw-overlay-v3/apply_android_overlay.py"
+          test -f "$RUNNER_TEMP/desksaw-overlay-v3/android/src/main/java/com/godot/game/DeskSawOverlayService.java"
 
       - name: Fetch pinned deskSaw source and apply base Android patch
         shell: bash
@@ -94,8 +92,6 @@ jobs:
           git -C source apply --check "$RUNNER_TEMP/android-port.patch"
           git -C source apply "$RUNNER_TEMP/android-port.patch"
 
-          # The upstream tree references godot-console, but its addon files are not
-          # present in the source checkout. Restore it before Godot initializes.
           rm -rf source/addons/godot-console
           git clone --depth=1 https://github.com/4d49/godot-console.git source/addons/godot-console
           sed -i 's#Console="\*uid://dc5wc5117h2vk"#Console="*res://addons/godot-console/scripts/console.gd"#' source/project.godot
@@ -104,9 +100,6 @@ jobs:
       - name: Install official Godot Gradle build template
         shell: bash
         run: |
-          # android_source.zip is Godot's official Gradle build template. Unpack it
-          # directly instead of launching the editor-side installer, which can remain
-          # alive in a headless CI process after completing the extraction.
           TEMPLATE_ZIP="$(find "$HOME/.local/share/godot/export_templates" -name android_source.zip -print -quit)"
           test -f "$TEMPLATE_ZIP"
           echo "Using Gradle template: $TEMPLATE_ZIP"
@@ -116,12 +109,13 @@ jobs:
           unzip -q "$TEMPLATE_ZIP" -d source/android/build
 
           test -f source/android/build/build.gradle
+          test -f source/android/build/src/main/AndroidManifest.xml
           find source/android/build -path '*/com/godot/game/GodotApp.java' -print -quit | grep -q .
 
       - name: Apply Android desktop-pet overlay integration
         shell: bash
         run: |
-          python "$RUNNER_TEMP/desksaw-overlay-v2/apply_android_overlay.py" \
+          python "$RUNNER_TEMP/desksaw-overlay-v3/apply_android_overlay.py" \
             "$GITHUB_WORKSPACE/source" \
             "$GITHUB_WORKSPACE/source/android/build"
 
@@ -135,11 +129,11 @@ jobs:
           grep -q 'sensors/enable_gyroscope=true' source/project.godot
           grep -q 'Console="\*res://addons/godot-console/scripts/console.gd"' source/project.godot
 
-          MANIFEST="$(grep -rl 'DeskSawOverlayService' source/android/build --include='AndroidManifest.xml' | head -n1)"
-          test -n "$MANIFEST"
+          MANIFEST="source/android/build/src/main/AndroidManifest.xml"
           grep -q 'android.permission.SYSTEM_ALERT_WINDOW' "$MANIFEST"
           grep -q 'android.permission.FOREGROUND_SERVICE' "$MANIFEST"
           grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$MANIFEST"
+          grep -q 'DeskSawOverlayService' "$MANIFEST"
           grep -q 'foregroundServiceType="specialUse"' "$MANIFEST"
 
           find source/android/build -name DeskSawOverlayService.java -print -quit | grep -q .
