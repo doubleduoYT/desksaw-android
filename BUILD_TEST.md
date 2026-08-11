@@ -15,3 +15,5 @@ Fast template trigger: resolve main scene UID as res://scenes/loading.tscn.
 Direct template trigger: unzip android_source.zip without editor installer.
 
 Concurrency trigger: cancel stale headless builds and run the direct-template build.
+
+Overlay v3 trigger: patch the real src/main AndroidManifest.xml.
