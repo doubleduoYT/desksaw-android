@@ -58,6 +58,7 @@ jobs:
           java -version
           test -x "$ANDROID_HOME/platform-tools/adb"
           test -d "$ANDROID_HOME/build-tools/35.0.1"
+          find "$HOME/.local/share/godot/export_templates" -name android_source.zip -print -quit | grep -q .
 
       - name: Reassemble base Android port patch
         shell: bash
@@ -97,22 +98,17 @@ jobs:
       - name: Install official Godot Gradle build template
         shell: bash
         run: |
-          # Transparent TYPE_APPLICATION_OVERLAY output and custom Android Java require
-          # Godot's Gradle build. Preload the overlay project's valid Gradle settings
-          # before asking Godot to install res://android/build.
-          cp "$RUNNER_TEMP/desksaw-overlay-v2/godot/project.godot" source/project.godot
-          cp "$RUNNER_TEMP/desksaw-overlay-v2/godot/export_presets.cfg" source/export_presets.cfg
-
-          # The upstream main scene UID resolves to res://scenes/loading.tscn. Use the
-          # path temporarily so the build-template installer does not need a full
-          # project import just to resolve run/main_scene. The overlay integration
-          # step below restores the final project.godot, including its original UID.
-          sed -i 's#run/main_scene="uid://cqg8h324jtya"#run/main_scene="res://scenes/loading.tscn"#' source/project.godot
-          grep -q 'run/main_scene="res://scenes/loading.tscn"' source/project.godot
+          # android_source.zip is Godot's official Gradle build template. Unpack it
+          # directly instead of launching the editor-side installer, which can remain
+          # alive in a headless CI process after completing the extraction.
+          TEMPLATE_ZIP="$(find "$HOME/.local/share/godot/export_templates" -name android_source.zip -print -quit)"
+          test -f "$TEMPLATE_ZIP"
+          echo "Using Gradle template: $TEMPLATE_ZIP"
 
           rm -rf source/android/build
-          godot --headless --verbose --path source --install-android-build-template
-          test -d source/android/build
+          mkdir -p source/android/build
+          unzip -q "$TEMPLATE_ZIP" -d source/android/build
+
           test -f source/android/build/build.gradle
           find source/android/build -path '*/com/godot/game/GodotApp.java' -print -quit | grep -q .
 
