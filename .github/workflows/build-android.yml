@@ -110,6 +110,13 @@ jobs:
           mkdir -p source/android/build
           unzip -q "$TEMPLATE_ZIP" -d source/android/build
 
+          # Godot's Project > Install Android Build Template action writes this
+          # marker beside android/build. Without it, export aborts before Gradle.
+          TEMPLATE_VERSION="$(basename "$(dirname "$TEMPLATE_ZIP")")"
+          printf '%s\n' "$TEMPLATE_VERSION" > source/android/.build_version
+          echo "Installed Android build template version: $TEMPLATE_VERSION"
+
+          test -s source/android/.build_version
           test -f source/android/build/build.gradle
           test -f source/android/build/src/main/AndroidManifest.xml
           find source/android/build -path '*/com/godot/game/GodotApp.java' -print -quit | grep -q .
@@ -176,13 +183,31 @@ jobs:
           godot --headless --verbose --path source --import
 
       - name: Export debug APK with Gradle
+        id: export_apk
         shell: bash
         run: |
           mkdir -p source/build
+          set +e
           godot --headless --verbose --path source \
-            --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android.apk"
+            --export-debug Android "$GITHUB_WORKSPACE/source/build/desksaw-android.apk" \
+            2>&1 | tee "$RUNNER_TEMP/godot-export.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
           test -s source/build/desksaw-android.apk
           ls -lh source/build/desksaw-android.apk
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desksaw-android-build-log
+          path: ${{ runner.temp }}/godot-export.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
