@@ -103,10 +103,12 @@ jobs:
           cp "$RUNNER_TEMP/desksaw-overlay-v2/godot/project.godot" source/project.godot
           cp "$RUNNER_TEMP/desksaw-overlay-v2/godot/export_presets.cfg" source/export_presets.cfg
 
-          # run/main_scene is stored as a UID. Build the project UID cache before
-          # invoking the command-line Gradle-template installer, otherwise Godot 4.7
-          # aborts before it can unpack android_source.zip.
-          godot --headless --verbose --path source --import
+          # The upstream main scene UID resolves to res://scenes/loading.tscn. Use the
+          # path temporarily so the build-template installer does not need a full
+          # project import just to resolve run/main_scene. The overlay integration
+          # step below restores the final project.godot, including its original UID.
+          sed -i 's#run/main_scene="uid://cqg8h324jtya"#run/main_scene="res://scenes/loading.tscn"#' source/project.godot
+          grep -q 'run/main_scene="res://scenes/loading.tscn"' source/project.godot
 
           rm -rf source/android/build
           godot --headless --verbose --path source --install-android-build-template
