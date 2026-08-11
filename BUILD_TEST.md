@@ -3,3 +3,5 @@
 This branch exists to trigger a pull-request build so the Android CI logs can be inspected and fixed before relying on main-branch builds.
 
 Synchronization trigger: Android build diagnostic.
+
+Toolchain hardening trigger: Godot 4.x settings + launcher fix.
