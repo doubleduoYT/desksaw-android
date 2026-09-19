@@ -1,156 +1,371 @@
-name: Release all Action APKs
+name: Rebuild and Release all Action APKs
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - ".github/workflows/release-all-action-apks.yml"
 
 permissions:
-  actions: read
+  actions: write
   contents: write
+
+concurrency:
+  group: rebuild-release-all-action-apks
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: actions-apk-archive-20260919
-      RELEASE_TITLE: deskSaw Android - Action APK Archive (2026-09-19)
-      STATUS_PATH: .github/release-all-action-apks-status-20260919.txt
+      RELEASE_TITLE: deskSaw Android - All Action APK Builds (2026-09-19)
 
     steps:
-      - name: Collect APKs from Actions artifacts
+      - name: Find distinct historical APK build states
         shell: bash
         run: |
           set -euo pipefail
 
-          work="$RUNNER_TEMP/desksaw-action-apks"
-          mkdir -p "$work/downloads" "$work/apks"
+          work="$RUNNER_TEMP/desksaw-rebuild-release"
+          mkdir -p "$work"
+          raw="$work/historical-runs.tsv"
+          states="$work/states.tsv"
 
-          manifest="$work/manifest.md"
-          {
-            echo "# deskSaw Android Action APK Archive"
-            echo
-            echo "Collected from all non-expired GitHub Actions artifacts available in this repository on 2026-09-19."
-            echo
-          } > "$manifest"
+          gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/actions/runs?per_page=100" \
+            --jq '.workflow_runs[]
+              | select(.conclusion == "success")
+              | select(
+                  .path == ".github/workflows/build-android.yml"
+                  or .path == ".github/workflows/build-android-v7.yml"
+                  or .path == ".github/workflows/build-android-v8.yml"
+                  or .path == ".github/workflows/build-android-touchfix.yml"
+                )
+              | [.path, .head_sha, (.id|tostring), .created_at] | @tsv' \
+            > "$raw"
 
-          mapfile -t rows < <(
-            gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
-              --jq '.artifacts[] | select(.expired == false) | [.id, .name, .workflow_run.id, .created_at] | @tsv'
-          )
-
-          count=0
-          for row in "${rows[@]}"; do
-            IFS=$'\t' read -r artifact_id artifact_name run_id created_at <<< "$row"
-
-            zip_path="$work/downloads/${artifact_id}.zip"
-            extract_dir="$work/downloads/${artifact_id}"
-            mkdir -p "$extract_dir"
-
-            curl --fail --location --silent --show-error \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
-              --output "$zip_path"
-
-            unzip -q "$zip_path" -d "$extract_dir"
-
-            while IFS= read -r -d '' apk; do
-              safe_artifact="$(printf '%s' "$artifact_name" | sed 's/[^A-Za-z0-9._-]/_/g')"
-              base="$(basename "$apk")"
-              out="$work/apks/${safe_artifact}-run${run_id}-artifact${artifact_id}-${base}"
-              cp "$apk" "$out"
-
-              sha256="$(sha256sum "$out" | awk '{print $1}')"
-              size="$(stat -c '%s' "$out")"
-              {
-                echo "- `$(basename "$out")`"
-                echo "  - run: $run_id"
-                echo "  - artifact: $artifact_id ($artifact_name)"
-                echo "  - created: $created_at"
-                echo "  - bytes: $size"
-                echo "  - sha256: `$sha256`"
-              } >> "$manifest"
-              count=$((count + 1))
-            done < <(find "$extract_dir" -type f -iname '*.apk' -print0)
-          done
-
-          if [ "$count" -eq 0 ]; then
-            echo "No APK files were found in any non-expired Actions artifact." >&2
+          if [ ! -s "$raw" ]; then
+            echo "No historical successful APK build runs found." >&2
             exit 1
           fi
 
-          echo >> "$manifest"
-          echo "Total APK files: **$count**" >> "$manifest"
+          cut -f1,2 "$raw" | sort -u > "$states"
+          state_count="$(wc -l < "$states" | tr -d ' ')"
 
-          echo "APK_COUNT=$count" >> "$GITHUB_ENV"
           echo "WORK_DIR=$work" >> "$GITHUB_ENV"
+          echo "STATE_COUNT=$state_count" >> "$GITHUB_ENV"
+          echo "Found $state_count distinct workflow+commit build states."
 
-      - name: Create or update release
+      - name: Create temporary refs and dispatch every distinct build
         shell: bash
         run: |
           set -euo pipefail
+
+          states_in="$WORK_DIR/states.tsv"
+          dispatched="$WORK_DIR/dispatched.tsv"
+          : > "$dispatched"
+
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "$started_at" > "$WORK_DIR/started_at.txt"
+
+          while IFS=$'\t' read -r workflow_path sha; do
+            workflow_file="$(basename "$workflow_path")"
+            case "$workflow_file" in
+              build-android-v8.yml) key="v8" ;;
+              build-android-v7.yml) key="v7" ;;
+              build-android-touchfix.yml) key="touchfix" ;;
+              build-android.yml) key="base" ;;
+              *) echo "Unexpected workflow: $workflow_file" >&2; exit 1 ;;
+            esac
+
+            short_sha="$(printf '%s' "$sha" | cut -c1-12)"
+            branch="rebuild-apk/$key-$short_sha"
+
+            if gh api -X GET "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" >/dev/null 2>&1; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" \
+                -f sha="$sha" -F force=true >/dev/null
+            else
+              gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                -f ref="refs/heads/$branch" -f sha="$sha" >/dev/null
+            fi
+
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_file/dispatches" \
+              -f ref="$branch" >/dev/null
+
+            printf '%s\t%s\t%s\t%s\n' "$workflow_path" "$sha" "$branch" "$workflow_file" >> "$dispatched"
+            echo "Dispatched $workflow_file at $sha on $branch"
+          done < "$states_in"
+
+      - name: Resolve dispatched run IDs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dispatched="$WORK_DIR/dispatched.tsv"
+          resolved="$WORK_DIR/resolved.tsv"
+          start="$(cat "$WORK_DIR/started_at.txt")"
+          total="$(wc -l < "$dispatched" | tr -d ' ')"
+
+          for attempt in $(seq 1 60); do
+            runs_json="$WORK_DIR/runs.json"
+            gh api -X GET "repos/$GITHUB_REPOSITORY/actions/runs?per_page=100" > "$runs_json"
+
+            : > "$resolved"
+            while IFS=$'\t' read -r workflow_path sha branch workflow_file; do
+              run_id="$(
+                jq -r \
+                  --arg path "$workflow_path" \
+                  --arg sha "$sha" \
+                  --arg branch "$branch" \
+                  --arg start "$start" \
+                  '.workflow_runs
+                    | map(select(
+                        .path == $path
+                        and .head_sha == $sha
+                        and .head_branch == $branch
+                        and .event == "workflow_dispatch"
+                        and .created_at >= $start
+                      ))
+                    | sort_by(.created_at)
+                    | last
+                    | .id // empty' \
+                  "$runs_json"
+              )"
+
+              if [ -n "$run_id" ]; then
+                printf '%s\t%s\t%s\t%s\t%s\n' "$workflow_path" "$sha" "$branch" "$workflow_file" "$run_id" >> "$resolved"
+              fi
+            done < "$dispatched"
+
+            found="$(wc -l < "$resolved" | tr -d ' ')"
+            echo "Resolved $found/$total dispatched runs."
+            if [ "$found" -eq "$total" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Timed out resolving dispatched run IDs." >&2
+          exit 1
+
+      - name: Wait for all rebuilds to finish
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resolved="$WORK_DIR/resolved.tsv"
+          results="$WORK_DIR/results.tsv"
+          total="$(wc -l < "$resolved" | tr -d ' ')"
+
+          for attempt in $(seq 1 240); do
+            : > "$results"
+            complete=0
+            runs_json="$WORK_DIR/current-runs.json"
+            gh api -X GET "repos/$GITHUB_REPOSITORY/actions/runs?per_page=100" > "$runs_json"
+
+            while IFS=$'\t' read -r workflow_path sha branch workflow_file run_id; do
+              status="$(jq -r --argjson id "$run_id" '.workflow_runs[] | select(.id == $id) | .status' "$runs_json" | head -n1)"
+              conclusion="$(jq -r --argjson id "$run_id" '.workflow_runs[] | select(.id == $id) | (.conclusion // "")' "$runs_json" | head -n1)"
+              url="$(jq -r --argjson id "$run_id" '.workflow_runs[] | select(.id == $id) | .html_url' "$runs_json" | head -n1)"
+
+              printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$workflow_path" "$sha" "$branch" "$workflow_file" "$run_id" "$status" "$conclusion" "$url" \
+                >> "$results"
+
+              if [ "$status" = "completed" ]; then
+                complete=$((complete + 1))
+              fi
+            done < "$resolved"
+
+            echo "Completed $complete/$total rebuilds."
+            if [ "$complete" -eq "$total" ]; then
+              exit 0
+            fi
+            sleep 15
+          done
+
+          echo "Timed out waiting for rebuilds." >&2
+          exit 1
+
+      - name: Collect successful APKs and build release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          results="$WORK_DIR/results.tsv"
+          raw="$WORK_DIR/historical-runs.tsv"
+          assets="$WORK_DIR/assets"
+          manifest="$WORK_DIR/release-notes.md"
+          mkdir -p "$assets"
+
+          {
+            echo "# deskSaw Android Action APK archive"
+            echo
+            echo "The original Actions artifacts had expired, so these APKs were regenerated from every distinct successful historical workflow + commit state."
+            echo
+            echo "- Distinct build states found: **$STATE_COUNT**"
+            echo "- Original successful APK workflow runs represented: **$(wc -l < "$raw" | tr -d ' ')**"
+            echo
+            echo "## Rebuilt APKs"
+            echo
+          } > "$manifest"
+
+          success_count=0
+          failure_count=0
+
+          while IFS=$'\t' read -r workflow_path sha branch workflow_file run_id status conclusion url; do
+            short_sha="$(printf '%s' "$sha" | cut -c1-12)"
+            case "$workflow_file" in
+              build-android-v8.yml) key="v8" ;;
+              build-android-v7.yml) key="v7" ;;
+              build-android-touchfix.yml) key="touchfix" ;;
+              build-android.yml) key="base" ;;
+              *) key="unknown" ;;
+            esac
+
+            original_runs="$(awk -F '\t' -v p="$workflow_path" -v s="$sha" '$1==p && $2==s {ids=(ids?ids", ":"")$3} END {print ids}' "$raw")"
+
+            if [ "$conclusion" != "success" ]; then
+              {
+                echo "- [FAIL] \`$workflow_file\` @ \`$short_sha\` - rebuild **$conclusion**"
+                echo "  - original run(s): $original_runs"
+                echo "  - rebuild run: $url"
+              } >> "$manifest"
+              failure_count=$((failure_count + 1))
+              continue
+            fi
+
+            artifact_json="$WORK_DIR/artifacts-$run_id.json"
+            gh api -X GET "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" > "$artifact_json"
+
+            mapfile -t artifact_ids < <(jq -r '.artifacts[] | select(.expired == false) | .id' "$artifact_json")
+            apk_found=0
+
+            for artifact_id in "${artifact_ids[@]}"; do
+              zip_path="$WORK_DIR/artifact-$artifact_id.zip"
+              extract_dir="$WORK_DIR/artifact-$artifact_id"
+              rm -rf "$extract_dir"
+              mkdir -p "$extract_dir"
+
+              curl --fail --location --silent --show-error \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+                --output "$zip_path"
+
+              unzip -q "$zip_path" -d "$extract_dir"
+
+              while IFS= read -r -d '' apk; do
+                apk_found=1
+                base="$(basename "$apk")"
+
+                version=""
+                badging="$(find "$extract_dir" -type f -name 'badging.txt' -print -quit || true)"
+                if [ -n "$badging" ]; then
+                  version="$(grep -o "versionName='[^']*'" "$badging" | head -n1 | cut -d"'" -f2 || true)"
+                fi
+                safe_version="$(printf '%s' "$version" | sed 's/[^A-Za-z0-9._-]/_/g')"
+                if [ -n "$safe_version" ]; then
+                  out_name="desksaw-android-$safe_version-$key-$short_sha.apk"
+                else
+                  stem="${base%.apk}"
+                  safe_stem="$(printf '%s' "$stem" | sed 's/[^A-Za-z0-9._-]/_/g')"
+                  out_name="$safe_stem-$key-$short_sha.apk"
+                fi
+
+                out="$assets/$out_name"
+                cp "$apk" "$out"
+
+                size="$(stat -c '%s' "$out")"
+                sha256="$(sha256sum "$out" | awk '{print $1}')"
+                {
+                  echo "- [OK] \`$out_name\`"
+                  echo "  - workflow: \`$workflow_file\`"
+                  echo "  - source commit: \`$sha\`"
+                  echo "  - original run(s): $original_runs"
+                  echo "  - rebuild run: $url"
+                  echo "  - bytes: $size"
+                  echo "  - SHA-256: \`$sha256\`"
+                } >> "$manifest"
+                success_count=$((success_count + 1))
+              done < <(find "$extract_dir" -type f -iname '*.apk' -print0)
+            done
+
+            if [ "$apk_found" -eq 0 ]; then
+              {
+                echo "- [FAIL] \`$workflow_file\` @ \`$short_sha\` - run succeeded but no APK artifact was found"
+                echo "  - original run(s): $original_runs"
+                echo "  - rebuild run: $url"
+              } >> "$manifest"
+              failure_count=$((failure_count + 1))
+            fi
+          done < "$results"
+
+          if [ "$success_count" -eq 0 ]; then
+            echo "No APKs could be regenerated." >&2
+            exit 1
+          fi
+
+          {
+            echo
+            echo "## Summary"
+            echo
+            echo "- APK assets regenerated: **$success_count**"
+            echo "- Build states that failed to regenerate: **$failure_count**"
+          } >> "$manifest"
+
+          echo "APK_COUNT=$success_count" >> "$GITHUB_ENV"
+          echo "FAILURE_COUNT=$failure_count" >> "$GITHUB_ENV"
+
+      - name: Create or update release and upload all APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest="$WORK_DIR/release-notes.md"
+          assets="$WORK_DIR/assets"
 
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$RELEASE_TITLE" \
-              --notes-file "$WORK_DIR/manifest.md"
+              --notes-file "$manifest"
           else
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_TITLE" \
-              --notes-file "$WORK_DIR/manifest.md"
+              --notes-file "$manifest"
           fi
 
-      - name: Upload every APK
-        shell: bash
-        run: |
-          set -euo pipefail
           while IFS= read -r -d '' apk; do
             gh release upload "$RELEASE_TAG" "$apk" \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
-          done < <(find "$WORK_DIR/apks" -maxdepth 1 -type f -iname '*.apk' -print0)
+          done < <(find "$assets" -maxdepth 1 -type f -iname '*.apk' -print0)
 
-      - name: Record verified success
+      - name: Clean up temporary rebuild branches
+        if: always()
         shell: bash
         run: |
-          set -euo pipefail
-
-          release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
-          status_file="$RUNNER_TEMP/release-status.txt"
-          {
-            echo "status=success"
-            echo "apk_count=$APK_COUNT"
-            echo "release_tag=$RELEASE_TAG"
-            echo "release_url=$release_url"
-            echo "workflow_run_id=$GITHUB_RUN_ID"
-            echo "source_commit=$GITHUB_SHA"
-          } > "$status_file"
-
-          encoded="$(base64 -w0 "$status_file")"
-          existing_sha="$(gh api -X GET "repos/$GITHUB_REPOSITORY/contents/$STATUS_PATH?ref=main" --jq '.sha' 2>/dev/null || true)"
-
-          if [ -n "$existing_sha" ]; then
-            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_PATH" \
-              -f message="Record successful APK archive release" \
-              -f content="$encoded" \
-              -f sha="$existing_sha" \
-              -f branch="main" >/dev/null
-          else
-            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_PATH" \
-              -f message="Record successful APK archive release" \
-              -f content="$encoded" \
-              -f branch="main" >/dev/null
+          set +e
+          if [ -f "$WORK_DIR/dispatched.tsv" ]; then
+            cut -f3 "$WORK_DIR/dispatched.tsv" | sort -u | while IFS= read -r branch; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" >/dev/null 2>&1 || true
+            done
           fi
 
       - name: Summary
         shell: bash
         run: |
-          echo "Released $APK_COUNT APK file(s) to tag $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
-          echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### deskSaw APK release"
+            echo
+            echo "- Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+            echo "- APK assets: $APK_COUNT"
+            echo "- Failed rebuild states: $FAILURE_COUNT"
+          } >> "$GITHUB_STEP_SUMMARY"
