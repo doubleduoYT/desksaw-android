@@ -1,0 +1,123 @@
+name: Release all Action APKs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/release-all-action-apks.yml"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: actions-apk-archive-20260919
+      RELEASE_TITLE: deskSaw Android - Action APK Archive (2026-09-19)
+
+    steps:
+      - name: Collect APKs from Actions artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          work="$RUNNER_TEMP/desksaw-action-apks"
+          mkdir -p "$work/downloads" "$work/apks"
+
+          manifest="$work/manifest.md"
+          {
+            echo "# deskSaw Android Action APK Archive"
+            echo
+            echo "Collected from all non-expired GitHub Actions artifacts available in this repository on 2026-09-19."
+            echo
+          } > "$manifest"
+
+          mapfile -t rows < <(
+            gh api --paginate -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.expired == false) | [.id, .name, .workflow_run.id, .created_at] | @tsv'
+          )
+
+          count=0
+          for row in "${rows[@]}"; do
+            IFS=$'\t' read -r artifact_id artifact_name run_id created_at <<< "$row"
+
+            zip_path="$work/downloads/${artifact_id}.zip"
+            extract_dir="$work/downloads/${artifact_id}"
+            mkdir -p "$extract_dir"
+
+            curl --fail --location --silent --show-error \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+              --output "$zip_path"
+
+            unzip -q "$zip_path" -d "$extract_dir"
+
+            while IFS= read -r -d '' apk; do
+              safe_artifact="$(printf '%s' "$artifact_name" | sed 's/[^A-Za-z0-9._-]/_/g')"
+              base="$(basename "$apk")"
+              out="$work/apks/${safe_artifact}-run${run_id}-artifact${artifact_id}-${base}"
+              cp "$apk" "$out"
+
+              sha256="$(sha256sum "$out" | awk '{print $1}')"
+              size="$(stat -c '%s' "$out")"
+              {
+                echo "- `$(basename "$out")`"
+                echo "  - run: $run_id"
+                echo "  - artifact: $artifact_id ($artifact_name)"
+                echo "  - created: $created_at"
+                echo "  - bytes: $size"
+                echo "  - sha256: `$sha256`"
+              } >> "$manifest"
+              count=$((count + 1))
+            done < <(find "$extract_dir" -type f -iname '*.apk' -print0)
+          done
+
+          if [ "$count" -eq 0 ]; then
+            echo "No APK files were found in any non-expired Actions artifact." >&2
+            exit 1
+          fi
+
+          echo >> "$manifest"
+          echo "Total APK files: **$count**" >> "$manifest"
+
+          echo "APK_COUNT=$count" >> "$GITHUB_ENV"
+          echo "WORK_DIR=$work" >> "$GITHUB_ENV"
+
+      - name: Create or update release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$WORK_DIR/manifest.md"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$WORK_DIR/manifest.md"
+          fi
+
+      - name: Upload every APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' apk; do
+            gh release upload "$RELEASE_TAG" "$apk" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          done < <(find "$WORK_DIR/apks" -maxdepth 1 -type f -iname '*.apk' -print0)
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "Released $APK_COUNT APK file(s) to tag $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
