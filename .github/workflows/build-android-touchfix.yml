@@ -27,7 +27,7 @@ jobs:
           java-version: "17"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android SDK packages
         shell: bash
@@ -108,10 +108,10 @@ jobs:
           fi
           grep -q 'FLAG_NOT_TOUCHABLE' "$(find source/android/build -name DeskSawOverlayService.java -print -quit)"
           grep -q 'package/unique_name="org.deedee14.desksaw.pet"' source/export_presets.cfg
-          grep -q 'gradle_build/target_sdk="33"' source/export_presets.cfg
-          ! grep -q 'FOREGROUND_SERVICE_SPECIAL_USE' source/android/build/src/main/AndroidManifest.xml
-          ! grep -q 'foregroundServiceType="specialUse"' source/android/build/src/main/AndroidManifest.xml
-          ! grep -q 'PROPERTY_SPECIAL_USE_FGS_SUBTYPE' source/android/build/src/main/AndroidManifest.xml
+          grep -q 'gradle_build/target_sdk="36"' source/export_presets.cfg
+          grep -q 'FOREGROUND_SERVICE_SPECIAL_USE' source/android/build/src/main/AndroidManifest.xml
+          grep -q 'foregroundServiceType="specialUse"' source/android/build/src/main/AndroidManifest.xml
+          grep -q 'PROPERTY_SPECIAL_USE_FGS_SUBTYPE' source/android/build/src/main/AndroidManifest.xml
           ! grep -q 'android.intent.category.HOME' source/android/build/src/main/AndroidManifest.xml
 
       - name: Configure persistent signing and Godot Android paths
