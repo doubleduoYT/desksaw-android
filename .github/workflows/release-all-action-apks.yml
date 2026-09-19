@@ -17,6 +17,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: actions-apk-archive-20260919
       RELEASE_TITLE: deskSaw Android - Action APK Archive (2026-09-19)
+      STATUS_PATH: .github/release-all-action-apks-status-20260919.txt
 
     steps:
       - name: Collect APKs from Actions artifacts
@@ -115,6 +116,38 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --clobber
           done < <(find "$WORK_DIR/apks" -maxdepth 1 -type f -iname '*.apk' -print0)
+
+      - name: Record verified success
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+          status_file="$RUNNER_TEMP/release-status.txt"
+          {
+            echo "status=success"
+            echo "apk_count=$APK_COUNT"
+            echo "release_tag=$RELEASE_TAG"
+            echo "release_url=$release_url"
+            echo "workflow_run_id=$GITHUB_RUN_ID"
+            echo "source_commit=$GITHUB_SHA"
+          } > "$status_file"
+
+          encoded="$(base64 -w0 "$status_file")"
+          existing_sha="$(gh api -X GET "repos/$GITHUB_REPOSITORY/contents/$STATUS_PATH?ref=main" --jq '.sha' 2>/dev/null || true)"
+
+          if [ -n "$existing_sha" ]; then
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_PATH" \
+              -f message="Record successful APK archive release" \
+              -f content="$encoded" \
+              -f sha="$existing_sha" \
+              -f branch="main" >/dev/null
+          else
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$STATUS_PATH" \
+              -f message="Record successful APK archive release" \
+              -f content="$encoded" \
+              -f branch="main" >/dev/null
+          fi
 
       - name: Summary
         shell: bash
