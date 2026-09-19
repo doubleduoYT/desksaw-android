@@ -1,0 +1,6 @@
+status=success
+apk_count=2
+release_tag=actions-apk-archive-20260919
+release_url=https://github.com/doubleduoYT/desksaw-android/releases/tag/actions-apk-archive-20260919
+workflow_run_id=35423891868
+source_commit=7940e2296b3fecf649e6c2d42dfe25b6eccf1042
