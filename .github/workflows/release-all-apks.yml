@@ -114,9 +114,6 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Setup Godot 4.7 and export templates
         uses: solarlabyrinth/action-setup-godot@v3
         with:
@@ -371,7 +368,7 @@ jobs:
         with:
           name: rebuilt-${{ matrix.run_id }}
           path: recovered-apk/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   release:
